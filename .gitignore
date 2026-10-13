@@ -1,17 +1,13 @@
-.venv/venv/
-__pycache__/
-*.pyc
 .env
-instance/
-.DS_Store
-.idea/
-.vscode/
-# DB and env
-instance/site.db
-.env
+.env.*
+!.env.example
+
 .venv/
 venv/
+
+instance/*.db
 __pycache__/
 *.pyc
+
 .vscode/
 .idea/

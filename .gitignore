@@ -6,3 +6,12 @@ instance/
 .DS_Store
 .idea/
 .vscode/
+# DB and env
+instance/site.db
+.env
+.venv/
+venv/
+__pycache__/
+*.pyc
+.vscode/
+.idea/

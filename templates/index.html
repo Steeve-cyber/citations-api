@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f6f1e9">
+  <meta name="description" content="Un carnet vivant de citations, d’auteurs et d’idées à garder près de soi.">
+  <title>{{ page_title }} · Le Carnet</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}">
+  <script src="{{ url_for('static', filename='js/app.js') }}" defer></script>
+</head>
+<body>
+  <svg class="icon-library" aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
+    <symbol id="i-spark" viewBox="0 0 24 24"><path d="m12 3 1.8 5.5L20 11l-6.2 2.5L12 20l-2-6.5L4 11l6-2.5L12 3Z"/><path d="m19 14 1 2 2 1-2 1-1 2-1-2-2-1 2-1 1-2Z"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.8" cy="10.8" r="6.8"/><path d="m16 16 4.5 4.5"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/></symbol>
+    <symbol id="i-heart" viewBox="0 0 24 24"><path d="M20.8 8.7c0 5.3-8.8 11-8.8 11s-8.8-5.7-8.8-11A4.7 4.7 0 0 1 12 6.2a4.7 4.7 0 0 1 8.8 2.5Z"/></symbol>
+    <symbol id="i-edit" viewBox="0 0 24 24"><path d="m15 5 4 4M4 20l4-.8L19 8a2.1 2.1 0 0 0-3-3L5 16l-1 4Z"/></symbol>
+    <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/></symbol>
+    <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></symbol>
+    <symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M5.6 9a7 7 0 0 1 11.8-2L20 12M4 12l2.6 5a7 7 0 0 0 11.8-2"/></symbol>
+    <symbol id="i-book" viewBox="0 0 24 24"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20v17H6.5A2.5 2.5 0 0 1 4 17.5zM4 16a2 2 0 0 1 2-2h14M8 7h8"/></symbol>
+    <symbol id="i-user" viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></symbol>
+  </svg>
+
+  <div class="ambient ambient-one" aria-hidden="true"></div><div class="ambient ambient-two" aria-hidden="true"></div>
+  <div class="page-shell">
+    <header class="site-header">
+      <a class="brand" href="/" aria-label="Le Carnet, accueil"><span class="brand-mark"><svg class="icon"><use href="#i-spark"/></svg></span><span><strong>le carnet</strong><small>CITATIONS & IDÉES</small></span></a>
+      <nav class="header-nav" aria-label="Navigation principale"><a href="#collection">La collection</a><a href="#about">À propos</a></nav>
+      <div class="header-actions"><button class="button button-quiet admin-trigger" type="button" id="admin-toggle">Espace éditeur</button><button class="button button-primary" type="button" data-open-quote><svg class="icon"><use href="#i-plus"/></svg><span>Ajouter une citation</span></button></div>
+    </header>
+
+    <main>
+      <section class="hero" aria-labelledby="hero-title">
+        <div class="hero-copy"><p class="eyebrow"><span class="eyebrow-line"></span> DES MOTS QUI RESTENT</p><h1 id="hero-title">Une pensée<br><em>à emporter.</em></h1><p class="hero-intro">Un carnet de phrases inspirantes, de voix singulières et d’idées qui méritent qu’on s’y attarde.</p><a class="hero-link" href="#collection">Explorer les citations <svg class="icon"><use href="#i-arrow"/></svg></a></div>
+        <aside class="featured-quote" aria-label="Citation à la une"><span class="featured-mark" aria-hidden="true">“</span><p class="featured-label">À GARDER PRÈS DE SOI</p><blockquote id="featured-text">Votre prochaine citation préférée apparaîtra ici.</blockquote><div class="featured-footer"><span class="featured-author" id="featured-author">À vous de la découvrir</span><button class="round-button" type="button" id="surprise-button" aria-label="Découvrir une autre citation" title="Une autre citation"><svg class="icon"><use href="#i-refresh"/></svg></button></div><span class="featured-orbit orbit-a" aria-hidden="true"></span><span class="featured-orbit orbit-b" aria-hidden="true"></span></aside>
+      </section>
+
+      <section class="stats-row" aria-label="Statistiques du carnet">
+        <article class="stat-card"><span class="stat-icon stat-terracotta"><svg class="icon"><use href="#i-book"/></svg></span><div><strong id="stat-quotes">—</strong><span>Citations recueillies</span></div></article>
+        <article class="stat-card"><span class="stat-icon stat-olive"><svg class="icon"><use href="#i-user"/></svg></span><div><strong id="stat-authors">—</strong><span>Auteurs à découvrir</span></div></article>
+        <article class="stat-card stat-note"><span class="tiny-star" aria-hidden="true">✳</span><div><strong id="stat-favorites">0</strong><span>Vos coups de cœur</span></div></article>
+      </section>
+
+      <section class="collection" id="collection" aria-labelledby="collection-title">
+        <div class="collection-heading"><div><p class="eyebrow">LE PLAISIR DE RELIRE</p><h2 id="collection-title">La collection</h2><p class="section-subtitle">Des fragments de sagesse, classés selon vos envies.</p></div><label class="search-box"><svg class="icon"><use href="#i-search"/></svg><input id="search-input" type="search" placeholder="Un auteur, un mot, une idée…" aria-label="Rechercher une citation"><kbd>⌘ K</kbd></label></div>
+        <div class="filters"><div class="filter-chips" id="tag-filters" role="group" aria-label="Filtrer par thème"><button class="filter-chip is-active" type="button" data-tag="">Tout</button></div><label class="sort-control"><span>Trier par</span><select id="sort-select" aria-label="Trier les citations"><option value="recent">Plus récentes</option><option value="author">Auteur</option></select></label></div>
+        <div class="quote-grid" id="quote-grid" aria-live="polite" aria-busy="true"><p class="loading-state">Les citations prennent place…</p></div>
+        <div class="collection-footer"><span id="result-count"></span><button class="button button-quiet" id="load-more" type="button" hidden>Voir plus de citations <svg class="icon"><use href="#i-arrow"/></svg></button></div>
+      </section>
+      <section class="closing-note" id="about"><span class="closing-spark" aria-hidden="true">✳</span><p>Une citation n’est jamais qu’une phrase,<br><em>jusqu’au moment où elle nous parle.</em></p><span class="closing-caption">LE CARNET · UN ESPACE POUR LES IDÉES</span></section>
+    </main>
+
+    <footer class="site-footer"><a class="footer-brand" href="/">le carnet</a><span>Les mots voyagent mieux quand on les partage.</span><span id="footer-year"></span></footer>
+  </div>
+
+  <div class="modal-backdrop" id="token-modal" hidden><section class="dialog dialog-small" role="dialog" aria-modal="true" aria-labelledby="token-title"><div class="dialog-top"><div><p class="eyebrow">ESPACE SÉCURISÉ</p><h2 id="token-title">Espace éditeur</h2></div><button class="icon-button" type="button" data-close-modal aria-label="Fermer"><svg class="icon"><use href="#i-close"/></svg></button></div><p class="dialog-intro">Saisissez le jeton d’administration défini dans votre configuration locale. Il reste uniquement dans cet onglet.</p><form id="token-form"><label class="field"><span>Jeton API</span><input id="token-input" type="password" autocomplete="current-password" required placeholder="Votre jeton d’administration"></label><p class="inline-error" id="token-error" role="alert" hidden></p><div class="dialog-actions"><button class="button button-quiet" type="button" data-close-modal>Annuler</button><button class="button button-primary" type="submit">Déverrouiller <svg class="icon"><use href="#i-arrow"/></svg></button></div></form></section></div>
+
+  <div class="modal-backdrop" id="quote-modal" hidden><section class="dialog" role="dialog" aria-modal="true" aria-labelledby="quote-dialog-title"><div class="dialog-top"><div><p class="eyebrow">UNE PENSÉE À TRANSMETTRE</p><h2 id="quote-dialog-title">Ajouter une citation</h2></div><button class="icon-button" type="button" data-close-modal aria-label="Fermer"><svg class="icon"><use href="#i-close"/></svg></button></div><form id="quote-form"><input id="quote-id" type="hidden"><label class="field"><span>La citation <i>*</i></span><textarea id="quote-text" rows="4" maxlength="500" required placeholder="Écrivez ici les mots à garder…"></textarea></label><div class="form-grid"><label class="field"><span>Auteur <i>*</i></span><input id="quote-author" type="text" maxlength="100" required placeholder="Nom de l’auteur"></label><label class="field"><span>Thèmes</span><input id="quote-tags" type="text" maxlength="200" placeholder="sagesse, courage, vie"></label></div><p class="inline-error" id="quote-error" role="alert" hidden></p><div class="dialog-actions"><button class="button button-quiet" type="button" data-close-modal>Annuler</button><button class="button button-primary" type="submit" id="quote-submit">Enregistrer la citation <svg class="icon"><use href="#i-arrow"/></svg></button></div></form></section></div>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+</body>
+</html>

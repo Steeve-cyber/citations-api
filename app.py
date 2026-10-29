@@ -1,356 +1,356 @@
+from __future__ import annotations
+
+import hmac
 import os
-from functools import wraps
-from flask import Flask, jsonify, render_template_string, request
-from flask_sqlalchemy import SQLAlchemy
+import secrets
 from datetime import datetime
+from functools import wraps
+
 import requests
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
+from flask import Flask, jsonify, render_template, request
+from flask_sqlalchemy import SQLAlchemy
+from sqlalchemy import func, or_, select
+from sqlalchemy.exc import SQLAlchemyError
 
 load_dotenv()
 
-app = Flask(__name__)
-
-# Configuration de la base de données PostgreSQL
-DATABASE_URL = os.getenv('DATABASE_URL', 'sqlite:///citations.db')
-# Fix pour PostgreSQL sur Render (postgresql:// → postgresql+psycopg2://)
-if DATABASE_URL.startswith('postgresql://'):
-    DATABASE_URL = DATABASE_URL.replace('postgresql://', 'postgresql+psycopg2://', 1)
-
-app.config['SQLALCHEMY_DATABASE_URI'] = DATABASE_URL
-app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-
-db = SQLAlchemy(app)
-
-# Token d'authentification
-API_TOKEN = os.getenv('API_TOKEN', 'secret-token-123')
+db = SQLAlchemy()
 
 
-# --- MODÈLE DE DONNÉES ---
 class Citation(db.Model):
-    """Modèle pour représenter une citation dans PostgreSQL."""
+    # Keep the original table/column names so the existing citations database remains usable.
+    __tablename__ = "citation"
+
     id = db.Column(db.Integer, primary_key=True)
     citation = db.Column(db.String(500), nullable=False)
     auteur = db.Column(db.String(100), nullable=False)
-    tags = db.Column(db.String(200), default="")
-    date_creation = db.Column(db.DateTime, default=datetime.utcnow)
+    tags = db.Column(db.String(200), nullable=False, default="")
+    date_creation = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
 
     def to_dict(self):
         return {
             "id": self.id,
             "citation": self.citation,
             "auteur": self.auteur,
-            "tags": self.tags.split(",") if self.tags else [],
-            "date_creation": self.date_creation.isoformat()
+            "tags": [tag.strip() for tag in (self.tags or "").split(",") if tag.strip()],
+            "date_creation": self.date_creation.isoformat() if self.date_creation else None,
         }
 
 
-# Créer les tables
-with app.app_context():
-    db.create_all()
+def _database_url():
+    url = os.getenv("DATABASE_URL", "sqlite:///citations.db").strip()
+    # Flask-SQLAlchemy resolves relative SQLite URLs from the instance folder.
+    # Normalize the old "instance/<file>" form to avoid instance/instance/<file>.
+    if url.startswith("sqlite:///instance/"):
+        url = url.replace("sqlite:///instance/", "sqlite:///", 1)
+    if url.startswith("postgres://"):
+        return url.replace("postgres://", "postgresql+psycopg2://", 1)
+    if url.startswith("postgresql://"):
+        return url.replace("postgresql://", "postgresql+psycopg2://", 1)
+    return url
+
+
+def _error(message, status):
+    return jsonify({"erreur": message}), status
+
+
+def _payload():
+    data = request.get_json(silent=True)
+    return data if isinstance(data, dict) else None
+
+
+def _normalize_tags(value):
+    if value is None:
+        return "", None
+    if isinstance(value, str):
+        tags = value.split(",")
+    elif isinstance(value, list) and all(isinstance(tag, str) for tag in value):
+        tags = value
+    else:
+        return None, "Les tags doivent être une liste de textes."
+
+    cleaned = []
+    for tag in tags:
+        normalized = tag.strip().lstrip("#")
+        if normalized and normalized.casefold() not in {item.casefold() for item in cleaned}:
+            if len(normalized) > 40:
+                return None, "Chaque tag doit contenir au maximum 40 caractères."
+            cleaned.append(normalized)
+    if len(cleaned) > 12:
+        return None, "Une citation peut contenir au maximum 12 tags."
+    result = ",".join(cleaned)
+    if len(result) > 200:
+        return None, "La liste de tags est trop longue."
+    return result, None
+
+
+def _citation_fields(data, partial=False):
+    if data is None:
+        return None, "Le corps de la requête doit être un objet JSON."
+    values = {}
+
+    if not partial or "citation" in data:
+        quote = data.get("citation")
+        if not isinstance(quote, str) or not quote.strip():
+            return None, "Le texte de la citation est obligatoire."
+        if len(quote.strip()) > 500:
+            return None, "La citation ne peut pas dépasser 500 caractères."
+        values["citation"] = quote.strip()
+
+    if not partial or "auteur" in data:
+        author = data.get("auteur")
+        if not isinstance(author, str) or not author.strip():
+            return None, "Le nom de l’auteur est obligatoire."
+        if len(author.strip()) > 100:
+            return None, "Le nom de l’auteur ne peut pas dépasser 100 caractères."
+        values["auteur"] = author.strip()
+
+    if not partial or "tags" in data:
+        tags, error = _normalize_tags(data.get("tags", []))
+        if error:
+            return None, error
+        values["tags"] = tags
+
+    if partial and not values:
+        return None, "Aucun champ à modifier n’a été fourni."
+    return values, None
+
+
+def create_app(test_config=None):
+    app = Flask(__name__, instance_relative_config=True)
+    os.makedirs(app.instance_path, exist_ok=True)
+    app.config.from_mapping(
+        SECRET_KEY=os.getenv("SECRET_KEY") or secrets.token_hex(32),
+        SQLALCHEMY_DATABASE_URI=_database_url(),
+        SQLALCHEMY_TRACK_MODIFICATIONS=False,
+        API_TOKEN=os.getenv("API_TOKEN", "").strip(),
+        SKIP_SCRAPING=os.getenv("SKIP_SCRAPING", "1").lower() in {"1", "true", "yes"},
+        DEBUG=os.getenv("FLASK_DEBUG", "0").lower() in {"1", "true", "yes"},
+    )
+    if test_config:
+        app.config.update(test_config)
+    db.init_app(app)
+
+    @app.after_request
+    def security_headers(response):
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+        response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+        response.headers.setdefault(
+            "Content-Security-Policy",
+            "default-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'",
+        )
+        return response
+
+    def token_required(view):
+        @wraps(view)
+        def decorated(*args, **kwargs):
+            expected = app.config.get("API_TOKEN", "")
+            if not expected:
+                return _error("Les actions d’administration ne sont pas configurées.", 503)
+            authorization = request.headers.get("Authorization", "")
+            supplied = authorization[7:].strip() if authorization.startswith("Bearer ") else ""
+            if not supplied:
+                return _error("Jeton d’authentification manquant.", 401)
+            if not hmac.compare_digest(supplied, expected):
+                return _error("Jeton invalide.", 403)
+            return view(*args, **kwargs)
+
+        return decorated
+
+    with app.app_context():
+        db.create_all()
+
+    @app.get("/")
+    def index():
+        return render_template("index.html", page_title="Le carnet des citations")
+
+    @app.get("/api/auth/check")
+    @token_required
+    def check_token():
+        return jsonify({"authenticated": True})
+
+    @app.get("/api/citations")
+    def get_citations():
+        query = select(Citation)
+        author = request.args.get("auteur", "").strip()[:100]
+        tag = request.args.get("tag", "").strip().lstrip("#")[:40]
+        keyword = (request.args.get("mot_cle") or request.args.get("q") or "").strip()[:120]
+
+        if author:
+            escaped = author.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            query = query.where(Citation.auteur.ilike(f"%{escaped}%", escape="\\"))
+        if tag:
+            escaped_tag = tag.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            query = query.where(Citation.tags.ilike(f"%{escaped_tag}%", escape="\\"))
+        if keyword:
+            escaped_keyword = keyword.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            pattern = f"%{escaped_keyword}%"
+            query = query.where(or_(Citation.citation.ilike(pattern, escape="\\"), Citation.auteur.ilike(pattern, escape="\\")))
+
+        sort = request.args.get("sort", "recent")
+        ordering = [Citation.auteur.asc(), Citation.id.desc()] if sort == "author" else [Citation.date_creation.desc(), Citation.id.desc()]
+        query = query.order_by(*ordering)
+
+        # The original endpoint still returns a JSON list. Pagination is opt-in.
+        if "page" not in request.args and "per_page" not in request.args:
+            citations = db.session.scalars(query).all()
+            return jsonify([citation.to_dict() for citation in citations])
+
+        page = max(1, request.args.get("page", 1, type=int))
+        per_page = min(60, max(1, request.args.get("per_page", 12, type=int)))
+        total = db.session.scalar(select(func.count()).select_from(query.subquery())) or 0
+        citations = db.session.scalars(query.offset((page - 1) * per_page).limit(per_page)).all()
+        return jsonify({
+            "items": [citation.to_dict() for citation in citations],
+            "page": page,
+            "per_page": per_page,
+            "total": total,
+            "pages": (total + per_page - 1) // per_page,
+        })
+
+    @app.get("/api/citations/<int:cit_id>")
+    def get_citation_by_id(cit_id):
+        citation = db.session.get(Citation, cit_id)
+        if not citation:
+            return _error("Citation introuvable.", 404)
+        return jsonify(citation.to_dict())
+
+    @app.post("/api/citations")
+    @token_required
+    def create_citation():
+        fields, error = _citation_fields(_payload())
+        if error:
+            return _error(error, 400)
+        citation = Citation(**fields)
+        db.session.add(citation)
+        try:
+            db.session.commit()
+        except SQLAlchemyError:
+            db.session.rollback()
+            app.logger.exception("Échec de création d’une citation.")
+            return _error("La citation n’a pas pu être enregistrée.", 500)
+        return jsonify(citation.to_dict()), 201
+
+    @app.put("/api/citations/<int:cit_id>")
+    @token_required
+    def update_citation(cit_id):
+        citation = db.session.get(Citation, cit_id)
+        if not citation:
+            return _error("Citation introuvable.", 404)
+        fields, error = _citation_fields(_payload(), partial=True)
+        if error:
+            return _error(error, 400)
+        for key, value in fields.items():
+            setattr(citation, key, value)
+        try:
+            db.session.commit()
+        except SQLAlchemyError:
+            db.session.rollback()
+            app.logger.exception("Échec de modification d’une citation.")
+            return _error("La citation n’a pas pu être modifiée.", 500)
+        return jsonify(citation.to_dict())
+
+    @app.delete("/api/citations/<int:cit_id>")
+    @token_required
+    def delete_citation(cit_id):
+        citation = db.session.get(Citation, cit_id)
+        if not citation:
+            return _error("Citation introuvable.", 404)
+        db.session.delete(citation)
+        try:
+            db.session.commit()
+        except SQLAlchemyError:
+            db.session.rollback()
+            app.logger.exception("Échec de suppression d’une citation.")
+            return _error("La citation n’a pas pu être supprimée.", 500)
+        return jsonify({"message": "Citation supprimée."})
+
+    @app.get("/api/stats")
+    def get_stats():
+        total = db.session.scalar(select(func.count(Citation.id))) or 0
+        authors = db.session.execute(
+            select(Citation.auteur, func.count(Citation.id)).group_by(Citation.auteur).order_by(func.count(Citation.id).desc())
+        ).all()
+        tag_counts = {}
+        for raw_tags in db.session.scalars(select(Citation.tags)).all():
+            for tag in (raw_tags or "").split(","):
+                normalized = tag.strip()
+                if normalized:
+                    tag_counts[normalized] = tag_counts.get(normalized, 0) + 1
+        return jsonify({
+            "total_citations": total,
+            "citations_par_auteur": {author: count for author, count in authors},
+            "tags_populaires": [
+                {"tag": tag, "count": count}
+                for tag, count in sorted(tag_counts.items(), key=lambda item: (-item[1], item[0].casefold()))[:10]
+            ],
+        })
+
+    @app.get("/health")
+    def health():
+        try:
+            db.session.execute(select(1))
+        except SQLAlchemyError:
+            db.session.rollback()
+            app.logger.exception("Contrôle de santé de la base en échec.")
+            return jsonify({"status": "error", "database": "unavailable"}), 503
+        return jsonify({"status": "ok", "database": "ok"})
+
+    @app.errorhandler(404)
+    def not_found(error):
+        if request.path.startswith("/api/"):
+            return _error("Ressource introuvable.", 404)
+        return render_template("404.html", page_title="Page introuvable"), 404
+
+    @app.errorhandler(500)
+    def server_error(error):
+        db.session.rollback()
+        app.logger.exception("Erreur interne du serveur.")
+        if request.path.startswith("/api/"):
+            return _error("Une erreur interne est survenue.", 500)
+        return render_template("500.html", page_title="Erreur serveur"), 500
+
+    return app
+
+
+app = create_app()
 
 
 def initialiser_base_donnees():
-    """Scrape et charge les citations si la BD est vide."""
+    """Charge des citations de démonstration depuis Quotes to Scrape si demandé."""
+    if app.config["SKIP_SCRAPING"]:
+        return
     with app.app_context():
-        if Citation.query.count() == 0:
-            print("Base de données vide. Scraping en cours...")
-            base_url = "https://quotes.toscrape.com/page/{page}/"
-            headers = {"User-Agent": "Mozilla/5.0"}
-
+        if db.session.scalar(select(func.count(Citation.id))):
+            return
+        try:
             for page in range(1, 4):
-                url = base_url.format(page=page)
-                response = requests.get(url, headers=headers)
+                response = requests.get(
+                    f"https://quotes.toscrape.com/page/{page}/",
+                    headers={"User-Agent": "LeCarnetCitations/1.0"},
+                    timeout=8,
+                )
                 if response.status_code != 200:
                     continue
-
                 soup = BeautifulSoup(response.text, "html.parser")
-                quotes = soup.find_all("div", class_="quote")
-
-                for quote in quotes:
-                    text = quote.find("span", class_="text").get_text(strip=True)
-                    author = quote.find("small", class_="author").get_text(strip=True)
-                    tags = [tag.get_text(strip=True) for tag in quote.find_all("a", class_="tag")]
-
-                    nouvelle_citation = Citation(
-                        citation=text,
-                        auteur=author,
-                        tags=",".join(tags)
-                    )
-                    db.session.add(nouvelle_citation)
-
+                for quote in soup.select("div.quote"):
+                    text = quote.select_one("span.text")
+                    author = quote.select_one("small.author")
+                    if not text or not author:
+                        continue
+                    tags = [tag.get_text(strip=True) for tag in quote.select("a.tag")]
+                    db.session.add(Citation(citation=text.get_text(strip=True)[:500], auteur=author.get_text(strip=True)[:100], tags=",".join(tags)[:200]))
                 db.session.commit()
-                print(f"Page {page} scrappée avec succès.")
-
-            print(f"Total citations chargées : {Citation.query.count()}")
-
-
-# Décorateur d'authentification
-def token_required(f):
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        auth_header = request.headers.get("Authorization")
-        if not auth_header or not auth_header.startswith("Bearer "):
-            return jsonify({"erreur": "Jeton d'authentification manquant"}), 401
-        token = auth_header.split(" ")[1]
-        if token != API_TOKEN:
-            return jsonify({"erreur": "Jeton invalide"}), 403
-        return f(*args, **kwargs)
-
-    return decorated
-
-
-# --- ROUTES API REST ---
-
-@app.route("/api/citations", methods=["GET"])
-def get_citations():
-    auteur = request.args.get("auteur")
-    tag = request.args.get("tag")
-    mot_cle = request.args.get("mot_cle")
-
-    query = Citation.query
-
-    if auteur:
-        query = query.filter(Citation.auteur.ilike(f"%{auteur}%"))
-    if tag:
-        query = query.filter(Citation.tags.ilike(f"%{tag}%"))
-    if mot_cle:
-        query = query.filter(Citation.citation.ilike(f"%{mot_cle}%"))
-
-    citations = query.all()
-    return jsonify([c.to_dict() for c in citations])
-
-
-@app.route("/api/citations/<int:cit_id>", methods=["GET"])
-def get_citation_by_id(cit_id):
-    citation = Citation.query.get(cit_id)
-    if not citation:
-        return jsonify({"erreur": "Citation introuvable"}), 404
-    return jsonify(citation.to_dict())
-
-
-@app.route("/api/citations", methods=["POST"])
-@token_required
-def create_citation():
-    data = request.get_json()
-    if not data or "citation" not in data or "auteur" not in data:
-        return jsonify({"erreur": "Les champs 'citation' et 'auteur' sont requis"}), 400
-
-    nouvelle_citation = Citation(
-        citation=data["citation"],
-        auteur=data["auteur"],
-        tags=",".join(data.get("tags", []))
-    )
-    db.session.add(nouvelle_citation)
-    db.session.commit()
-    return jsonify(nouvelle_citation.to_dict()), 201
-
-
-@app.route("/api/citations/<int:cit_id>", methods=["PUT"])
-@token_required
-def update_citation(cit_id):
-    citation = Citation.query.get(cit_id)
-    if not citation:
-        return jsonify({"erreur": "Citation introuvable"}), 404
-
-    data = request.get_json()
-    if "citation" in data:
-        citation.citation = data["citation"]
-    if "auteur" in data:
-        citation.auteur = data["auteur"]
-    if "tags" in data:
-        citation.tags = ",".join(data["tags"])
-
-    db.session.commit()
-    return jsonify(citation.to_dict())
-
-
-@app.route("/api/citations/<int:cit_id>", methods=["DELETE"])
-@token_required
-def delete_citation(cit_id):
-    citation = Citation.query.get(cit_id)
-    if not citation:
-        return jsonify({"erreur": "Citation introuvable"}), 404
-
-    db.session.delete(citation)
-    db.session.commit()
-    return jsonify({"message": "Citation supprimée"}), 200
-
-
-@app.route("/api/stats", methods=["GET"])
-def get_stats():
-    total = Citation.query.count()
-    auteurs = db.session.query(Citation.auteur, db.func.count(Citation.id)).group_by(Citation.auteur).all()
-
-    return jsonify({
-        "total_citations": total,
-        "citations_par_auteur": {auteur: count for auteur, count in auteurs}
-    })
-
-
-# --- FRONTEND ---
-HTML_TEMPLATE = """
-<!DOCTYPE html>
-<html lang="fr">
-<head>
-    <meta charset="UTF-8">
-    <title>Gestionnaire de Citations</title>
-    <style>
-        body { font-family: Arial, sans-serif; max-width: 900px; margin: 30px auto; padding: 20px; background: #f4f4f9; }
-        h1 { color: #2c3e50; }
-        .card { background: white; padding: 20px; margin-bottom: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
-        input, button { padding: 8px; margin: 5px 0; font-size: 14px; }
-        button { background: #3498db; color: white; border: none; border-radius: 4px; cursor: pointer; }
-        button:hover { background: #2980b9; }
-        .danger { background: #e74c3c; }
-        .danger:hover { background: #c0392b; }
-        .tag { background: #ecf0f1; padding: 2px 6px; border-radius: 4px; font-size: 12px; margin-right: 4px; }
-        ul { padding-left: 20px; }
-        li { margin-bottom: 10px; }
-        .online { color: green; font-weight: bold; }
-    </style>
-</head>
-<body>
-    <h1>🌐 Gestionnaire de Citations (API & Frontend)</h1>
-    <p class="online">✅ En ligne sur Render avec PostgreSQL</p>
-
-    <div class="card">
-        <h2>Authentification (Token API)</h2>
-        <label>Token Bearer : </label>
-        <input type="text" id="apiToken" value="secret-token-123" style="width: 250px;">
-    </div>
-
-    <div class="card">
-        <h2>Statistiques & Actions</h2>
-        <button onclick="chargerStats()">Voir les Statistiques</button>
-        <button onclick="chargerCitations()">Rafraîchir la liste</button>
-        <div id="statsResult" style="margin-top: 10px; font-weight: bold;"></div>
-    </div>
-
-    <div class="card">
-        <h2>Ajouter une Citation (Protégé)</h2>
-        <input type="text" id="newCitation" placeholder="Texte de la citation" style="width: 100%;"><br>
-        <input type="text" id="newAuteur" placeholder="Auteur"><br>
-        <input type="text" id="newTags" placeholder="Tags (séparés par des virgules)"><br>
-        <button onclick="ajouterCitation()">Ajouter</button>
-    </div>
-
-    <div class="card">
-        <h2>Liste des Citations</h2>
-        <input type="text" id="searchInput" placeholder="Filtrer par auteur ou mot-clé..." onkeyup="filtrerListe()" style="width: 100%;">
-        <ul id="citationsList">Chargement...</ul>
-    </div>
-
-    <script>
-        let toutesLesCitations = [];
-
-        async function chargerCitations() {
-            const res = await fetch('/api/citations');
-            toutesLesCitations = await res.json();
-            afficherCitations(toutesLesCitations);
-        }
-
-        function afficherCitations(citations) {
-            const list = document.getElementById('citationsList');
-            list.innerHTML = '';
-            if (citations.length === 0) {
-                list.innerHTML = '<li>Aucune citation trouvée.</li>';
-                return;
-            }
-            citations.forEach(q => {
-                let tagsHtml = (q.tags || []).map(t => `<span class="tag">#${t}</span>`).join('');
-                let li = document.createElement('li');
-                li.innerHTML = `<strong>#${q.id} - ${q.auteur}</strong>: "${q.citation}" <br>${tagsHtml} 
-                                <button class="danger" onclick="supprimerCitation(${q.id})">Supprimer</button>`;
-                list.appendChild(li);
-            });
-        }
-
-        async function chargerStats() {
-            const res = await fetch('/api/stats');
-            const stats = await res.json();
-            const auteurs = Object.keys(stats.citations_par_auteur).length;
-            document.getElementById('statsResult').innerText = `Total citations : ${stats.total_citations} | Auteurs uniques : ${auteurs}`;
-        }
-
-        async function ajouterCitation() {
-            const token = document.getElementById('apiToken').value;
-            const citation = document.getElementById('newCitation').value;
-            const auteur = document.getElementById('newAuteur').value;
-            const tags = document.getElementById('newTags').value.split(',').map(t => t.trim()).filter(t => t);
-
-            if (!citation || !auteur) {
-                alert('Veuillez remplir tous les champs.');
-                return;
-            }
-
-            const res = await fetch('/api/citations', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': 'Bearer ' + token
-                },
-                body: JSON.stringify({ citation, auteur, tags })
-            });
-
-            if (res.ok) {
-                alert('Citation ajoutée avec succès !');
-                document.getElementById('newCitation').value = '';
-                document.getElementById('newAuteur').value = '';
-                document.getElementById('newTags').value = '';
-                chargerCitations();
-            } else {
-                const err = await res.json();
-                alert('Erreur : ' + (err.erreur || 'Action non autorisée'));
-            }
-        }
-
-        async function supprimerCitation(id) {
-            const token = document.getElementById('apiToken').value;
-            if (!confirm('Voulez-vous vraiment supprimer cette citation ?')) return;
-
-            const res = await fetch(`/api/citations/${id}`, {
-                method: 'DELETE',
-                headers: {
-                    'Authorization': 'Bearer ' + token
-                }
-            });
-
-            if (res.ok) {
-                chargerCitations();
-            } else {
-                const err = await res.json();
-                alert('Erreur : ' + (err.erreur || 'Action non autorisée'));
-            }
-        }
-
-        function filtrerListe() {
-            const query = document.getElementById('searchInput').value.toLowerCase();
-            const filtrees = toutesLesCitations.filter(q => 
-                q.citation.toLowerCase().includes(query) || q.auteur.toLowerCase().includes(query)
-            );
-            afficherCitations(filtrees);
-        }
-
-        chargerCitations();
-        chargerStats();
-    </script>
-</body>
-</html>
-"""
-
-
-@app.route("/", methods=["GET"])
-def index():
-    return render_template_string(HTML_TEMPLATE)
-
-
-@app.route("/health", methods=["GET"])
-def health():
-    return jsonify({"status": "ok"}), 200
+        except (requests.RequestException, SQLAlchemyError):
+            db.session.rollback()
+            app.logger.exception("Impossible de récupérer les citations de démonstration.")
 
 
 if __name__ == "__main__":
-    initialiser_base_donnees()
-    port = int(os.environ.get('PORT', 5000))
-    app.run(debug=True, host='127.0.0.1', port=port)
+    if not app.config["SKIP_SCRAPING"]:
+        initialiser_base_donnees()
+    app.run(host="127.0.0.1", port=int(os.getenv("PORT", "5000")), debug=app.config["DEBUG"])

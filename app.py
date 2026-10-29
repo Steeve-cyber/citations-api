@@ -354,3 +354,4 @@ if __name__ == "__main__":
     if not app.config["SKIP_SCRAPING"]:
         initialiser_base_donnees()
     app.run(host="127.0.0.1", port=int(os.getenv("PORT", "5000")), debug=app.config["DEBUG"])
+    app = create_app()

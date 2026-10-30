@@ -3,11 +3,9 @@ from __future__ import annotations
 import hmac
 import os
 import secrets
-from datetime import datetime
+from datetime import datetime, timezone
 from functools import wraps
 
-import requests
-from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from flask import Flask, jsonify, render_template, request
 from flask_sqlalchemy import SQLAlchemy
@@ -16,7 +14,15 @@ from sqlalchemy.exc import SQLAlchemyError
 
 load_dotenv()
 
+# Vercel définit automatiquement la variable d'environnement VERCEL.
+IS_VERCEL = bool(os.getenv("VERCEL"))
+
 db = SQLAlchemy()
+
+
+def _utcnow():
+    # Date UTC "naïve" (compatible avec les données existantes), sans l'avertissement de datetime.utcnow().
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 class Citation(db.Model):
@@ -27,7 +33,7 @@ class Citation(db.Model):
     citation = db.Column(db.String(500), nullable=False)
     auteur = db.Column(db.String(100), nullable=False)
     tags = db.Column(db.String(200), nullable=False, default="")
-    date_creation = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+    date_creation = db.Column(db.DateTime, nullable=False, default=_utcnow)
 
     def to_dict(self):
         return {
@@ -40,7 +46,11 @@ class Citation(db.Model):
 
 
 def _database_url():
-    url = os.getenv("DATABASE_URL", "sqlite:///citations.db").strip()
+    url = os.getenv("DATABASE_URL", "").strip()
+    if not url:
+        # Sur Vercel, seul /tmp est inscriptible (données éphémères) : simple filet de sécurité.
+        # En production, définir DATABASE_URL vers une base PostgreSQL.
+        return "sqlite:////tmp/citations.db" if IS_VERCEL else "sqlite:///citations.db"
     # Flask-SQLAlchemy resolves relative SQLite URLs from the instance folder.
     # Normalize the old "instance/<file>" form to avoid instance/instance/<file>.
     if url.startswith("sqlite:///instance/"):
@@ -59,6 +69,11 @@ def _error(message, status):
 def _payload():
     data = request.get_json(silent=True)
     return data if isinstance(data, dict) else None
+
+
+def _escape_like(value):
+    """Échappe les caractères spéciaux d'un motif LIKE (à utiliser avec escape="\\")."""
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 def _normalize_tags(value):
@@ -120,11 +135,15 @@ def _citation_fields(data, partial=False):
 
 def create_app(test_config=None):
     app = Flask(__name__, instance_relative_config=True)
-    os.makedirs(app.instance_path, exist_ok=True)
+    try:
+        os.makedirs(app.instance_path, exist_ok=True)
+    except OSError:
+        pass  # Système de fichiers en lecture seule (Vercel) : le dossier instance n'est pas nécessaire.
     app.config.from_mapping(
         SECRET_KEY=os.getenv("SECRET_KEY") or secrets.token_hex(32),
         SQLALCHEMY_DATABASE_URI=_database_url(),
         SQLALCHEMY_TRACK_MODIFICATIONS=False,
+        SQLALCHEMY_ENGINE_OPTIONS={"pool_pre_ping": True, "pool_recycle": 300},
         API_TOKEN=os.getenv("API_TOKEN", "").strip(),
         SKIP_SCRAPING=os.getenv("SKIP_SCRAPING", "1").lower() in {"1", "true", "yes"},
         DEBUG=os.getenv("FLASK_DEBUG", "0").lower() in {"1", "true", "yes"},
@@ -132,6 +151,12 @@ def create_app(test_config=None):
     if test_config:
         app.config.update(test_config)
     db.init_app(app)
+
+    if IS_VERCEL and app.config["SQLALCHEMY_DATABASE_URI"].startswith("sqlite"):
+        app.logger.warning(
+            "DATABASE_URL est absent : SQLite temporaire dans /tmp, les données seront perdues. "
+            "Configurez une base PostgreSQL dans les variables d'environnement Vercel."
+        )
 
     @app.after_request
     def security_headers(response):
@@ -155,14 +180,20 @@ def create_app(test_config=None):
             supplied = authorization[7:].strip() if authorization.startswith("Bearer ") else ""
             if not supplied:
                 return _error("Jeton d’authentification manquant.", 401)
-            if not hmac.compare_digest(supplied, expected):
+            # Comparaison sur des octets : hmac.compare_digest lève une TypeError
+            # (donc une erreur 500) si une chaîne contient des caractères non ASCII.
+            if not hmac.compare_digest(supplied.encode("utf-8"), expected.encode("utf-8")):
                 return _error("Jeton invalide.", 403)
             return view(*args, **kwargs)
 
         return decorated
 
     with app.app_context():
-        db.create_all()
+        try:
+            db.create_all()
+        except SQLAlchemyError:
+            # Ne pas faire planter l'import : le site démarre et /health signalera le problème.
+            app.logger.exception("Initialisation de la base impossible.")
 
     @app.get("/")
     def index():
@@ -181,14 +212,11 @@ def create_app(test_config=None):
         keyword = (request.args.get("mot_cle") or request.args.get("q") or "").strip()[:120]
 
         if author:
-            escaped = author.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-            query = query.where(Citation.auteur.ilike(f"%{escaped}%", escape="\\"))
+            query = query.where(Citation.auteur.ilike(f"%{_escape_like(author)}%", escape="\\"))
         if tag:
-            escaped_tag = tag.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-            query = query.where(Citation.tags.ilike(f"%{escaped_tag}%", escape="\\"))
+            query = query.where(Citation.tags.ilike(f"%{_escape_like(tag)}%", escape="\\"))
         if keyword:
-            escaped_keyword = keyword.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-            pattern = f"%{escaped_keyword}%"
+            pattern = f"%{_escape_like(keyword)}%"
             query = query.where(or_(Citation.citation.ilike(pattern, escape="\\"), Citation.auteur.ilike(pattern, escape="\\")))
 
         sort = request.args.get("sort", "recent")
@@ -202,7 +230,7 @@ def create_app(test_config=None):
 
         page = max(1, request.args.get("page", 1, type=int))
         per_page = min(60, max(1, request.args.get("per_page", 12, type=int)))
-        total = db.session.scalar(select(func.count()).select_from(query.subquery())) or 0
+        total = db.session.scalar(select(func.count()).select_from(query.order_by(None).subquery())) or 0
         citations = db.session.scalars(query.offset((page - 1) * per_page).limit(per_page)).all()
         return jsonify({
             "items": [citation.to_dict() for citation in citations],
@@ -306,6 +334,12 @@ def create_app(test_config=None):
             return _error("Ressource introuvable.", 404)
         return render_template("404.html", page_title="Page introuvable"), 404
 
+    @app.errorhandler(405)
+    def method_not_allowed(error):
+        if request.path.startswith("/api/"):
+            return _error("Méthode non autorisée.", 405)
+        return error
+
     @app.errorhandler(500)
     def server_error(error):
         db.session.rollback()
@@ -324,6 +358,11 @@ def initialiser_base_donnees():
     """Charge des citations de démonstration depuis Quotes to Scrape si demandé."""
     if app.config["SKIP_SCRAPING"]:
         return
+    # Imports locaux : ces paquets ne servent qu'à ce chargement initial (en local),
+    # pas au site en production. Ainsi, ils ne peuvent pas faire échouer le démarrage.
+    import requests
+    from bs4 import BeautifulSoup
+
     with app.app_context():
         if db.session.scalar(select(func.count(Citation.id))):
             return
@@ -354,4 +393,3 @@ if __name__ == "__main__":
     if not app.config["SKIP_SCRAPING"]:
         initialiser_base_donnees()
     app.run(host="127.0.0.1", port=int(os.getenv("PORT", "5000")), debug=app.config["DEBUG"])
-    app = create_app()
